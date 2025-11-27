@@ -18,7 +18,7 @@ Mellem 1867 og 1920 udgav det danske politi et blad kaldet "Politiets Efterretni
 library(readxl)
 df <- readxl(insertnameofexceldocumenthere.xlsx)
 ```
-
+<br/>
 
 [!IMPORTANT]
 >Det følgende datasæt inkludere potentielt stødende materiale.
