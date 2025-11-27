@@ -22,11 +22,17 @@ df <- readxl(insertnameofexceldocumenthere.xlsx)
 <br/>
 
 ## Documentation
+<br/>
 Følgende datasæt er baseret på overleveret indskanninger fra Københavns stadsarkiv. I alt sidder datasættet på cirka 16000 sider værd af information fra Politiets efterrettninger i perioden 1867-1890. <br/>
 Primær informationsprocessering er fortaget igennem Transkribus. 
+<br/>
+
+# Data Sample
+<img width="458" height="417" alt="Data_sample" src="https://github.com/user-attachments/assets/72f2f197-3f8a-4df8-bc0f-348149e7e48a" />
 
 ## License
-Shield: [![CC BY 4.0][cc-by-shield]][cc-by]
+Shield: [![CC BY 4.0][cc-by-shield]][cc-by]![Uploading Data_sample.PNG…]()
+
 
 This work is licensed under a
 [Creative Commons Attribution 4.0 International License][cc-by].
