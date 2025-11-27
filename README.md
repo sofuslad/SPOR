@@ -1,6 +1,6 @@
 
 <br/>
-<img width="627" height="272" alt="København" src="https://github.com/user-attachments/assets/14910d4e-5a1a-4257-9ea0-6b1d7ab054f7" />
+<img width="850" height="272" alt="København" src="https://github.com/user-attachments/assets/14910d4e-5a1a-4257-9ea0-6b1d7ab054f7" />
 <br/>
 
 # SPOR
