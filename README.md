@@ -21,6 +21,8 @@ df <- readxl(insertnameofexceldocumenthere.xlsx)
 ```
 <br/>
 
+## Documentation
+Følgende datasæt er baseret på overleveret indskanninger fra Københavns stadsarkiv.
 
 
 
