@@ -27,10 +27,12 @@ Følgende datasæt er baseret på overleveret indskanninger fra Københavns stad
 Primær informationsprocessering er fortaget igennem Transkribus. 
 <br/>
 
-### Data Sample
+### *Data Sample*
+<ins> I nedstående Data-sample er tekst region og linje region fremhævet</ins>
 <img width="458" height="417" alt="Data_sample" src="https://github.com/user-attachments/assets/72f2f197-3f8a-4df8-bc0f-348149e7e48a" />
+<br/>
+Tekst regioner og linjer er rettet igennem af en gruppe studerende der arbejdede på dette projekt.
 
-<ins> I overstående Data-sample er tekst region og linje region fremhævet for at fremme formidlingskraften  </ins>
 
 ## License
 Shield: [![CC BY 4.0][cc-by-shield]][cc-by]![Uploading Data_sample.PNG…]()
