@@ -1,0 +1,726 @@
+---
+title: "pe_linking_1"
+format: html
+editor: visual
+---
+
+Lidt rensning og ekstraktion af alder
+
+```{r}
+library(tidyverse)
+library(fuzzyjoin)
+library(stringdist)
+library(igraph)
+
+regulære <- read.csv("Regulære_siders_tekster_struktureret_12nov.csv") %>% 
+  mutate(
+    year = as.numeric(str_extract(dato, "\\d{4}")),
+    age = case_when(
+      str_detect(age_or_date_of_birth, "Nar\\.$|Aar|years|år|A\\.| A$|gl.|age in") ~ as.numeric(str_extract(age_or_date_of_birth, "\\d{1,2}")),
+      str_detect(age_or_date_of_birth, "19[0-6][0-9]") ~ year - (as.numeric(str_extract(age_or_date_of_birth, "\\d{4}")) - 100),
+           str_detect(age_or_date_of_birth, "18[0-6][0-9]") ~ year - as.numeric(str_extract(age_or_date_of_birth, "\\d{4}")),
+      str_detect(age_or_date_of_birth, "/") ~ as.numeric(str_extract(Text, "(?<=(,|\\.)\\s?)\\d{2}(?=\\s?,)")),
+      str_detect(Text, "Aar") & str_detect(age_or_date_of_birth, "/") ~ as.numeric(str_extract(age_or_date_of_birth,"\\d{2}")),
+      .default = NULL
+    ),
+    overskrift_el_forbrydelse = case_when(
+           grepl("hjemsendt|hjemreist|gjemsendt|hjemsende|hiemsendt", seneste_overskrift, ignore.case = T) ~ "Hjemsendte/hjemrejste",
+           grepl("efterlysning", seneste_overskrift, ignore.case = T) ~ "Efterlysninger",
+           grepl("aflysning", seneste_overskrift, ignore.case = T) ~ "Aflysninger",
+           grepl("fremlysning", seneste_overskrift, ignore.case = T) ~ "Fremlysninger",
+           grepl("løsladt|løsladelse|løsladt", seneste_overskrift, ignore.case = T) ~ "Løsladte",
+           grepl("anholdt|anholte", seneste_overskrift, ignore.case = T) ~ "Anholdte",
+           grepl("strafattest|straffeattest|srafatte|stafatte", seneste_overskrift, ignore.case = T) ~ "Rekvireret strafattester",
+           grepl("fattigvæsnet|fattigvæsen|fattiggæse|fattigæse", seneste_overskrift, ignore.case = T) & 
+             grepl("aflevere", seneste_overskrift, ignore.case = T) ~ "Afleverede (fattigvæsnet)",
+           grepl("straffeanstalt|strafanst", seneste_overskrift, ignore.case = T) &
+             grepl("aflevere", seneste_overskrift, ignore.case = T) ~ "Afleverede (straffeanstalt)",
+           grepl("almindelige", seneste_overskrift, ignore.case = T) ~ "Efterretninger (almindelige)",
+           grepl("kjøbenhavnsk", seneste_overskrift, ignore.case = T) ~ "Efterretninger (Kbh.)",
+           grepl("(i|j)ndlagt", seneste_overskrift, ignore.case = T) ~ "Indlagte",
+           grepl("andre medd", seneste_overskrift, ignore.case = T) ~ "Andre meddelelser",
+           grepl("dagsbefa", seneste_overskrift, ignore.case = T) ~ "Dagsbefalinger",
+           .default = seneste_overskrift
+         ),
+    Livsbegivenhed = paste("Optræder i Politiets Efterretninger under overskriften: ", overskrift_el_forbrydelse,
+                                "\nTekst: ", Text,
+                           sep = ""))
+
+fruentimmer <- read.csv("fruentimmer_struktureret.csv") %>% 
+  mutate(year = as.numeric(str_extract(dato, "\\d{4}")),
+         age = case_when(
+           str_detect(age_or_date_of_birth, "year|(A|a)ar|år") ~ as.numeric(str_extract(age_or_date_of_birth, "\\d{2}(?=,?\\s(Aar|(A|a)ar|years|år))")),
+           str_detect(age_or_date_of_birth, "19[0-6][0-9]") ~ year - (as.numeric(str_extract(age_or_date_of_birth, "\\d{4}")) - 100),
+           str_detect(age_or_date_of_birth, "18[0-6][0-9]") ~ year - as.numeric(str_extract(age_or_date_of_birth, "\\d{4}")),
+           str_detect(age_or_date_of_birth, "^\\d{2}, ") ~ as.numeric(str_extract(age_or_date_of_birth, "^\\d{2}(?=,)")),
+           str_detect(age_or_date_of_birth, "[0-6][0-9]$") ~ as.numeric(str_extract(year, "\\d{2}$")) - as.numeric(str_extract(age_or_date_of_birth, "\\d{2}$")),
+           str_detect(Text, "(,|\\.) \\d{2}(,|\\.)") ~ as.numeric(str_extract(Text, "(?<=(,|\\.)) \\d{2}(?=,|\\.)")),
+           str_detect(Text, "(,|\\.) \\d{2} ") ~ as.numeric(str_extract(Text, "(?<=(,|\\.)) \\d{2}(?= )")),
+           .default = NULL
+         ),
+         overskrift_el_forbrydelse = case_when(
+           str_detect(seneste_overskrift, "indskrevne|skrevne") ~ "Indskrevne som offentlige fruentimmere",
+           str_detect(seneste_overskrift, "udslettede") ~ "Udskrevne som offentlige fruentimmere",
+           str_detect(seneste_overskrift, "Tilsyn") &
+             str_detect(seneste_overskrift, "satte") ~ "Sat under tilsyn (§4 i lov af 10. april 1874)",
+           str_detect(seneste_overskrift, "Tilsyn") &
+             str_detect(seneste_overskrift, "udgaaede") ~ "Udgået af tilsyn (§4 i lov af 10. april 1874)",
+           str_detect(seneste_overskrift, "dømte") ~ "Dømte, §180 i straffeloven af 1866",
+           str_detect(seneste_overskrift, "ankomne|ereankomne") ~ "Offentlig fruentimmere ankomne fra fremmed jurisdiktion",
+           str_detect(seneste_overskrift, "bortre(i|j)ste") ~ "Offentlige fruentimmere bortrejste fra jurisdiktionen",
+           str_detect(seneste_overskrift, "Advarsel") ~ "Advaret efter straffelovens §180 og §3 i lov af 10. april 1874",
+           str_detect(seneste_overskrift, "Andre Meddelelser") ~ "Andre meddelelser"
+         ),
+         Livsbegivenhed = paste("Optræder i Politiets Efterretninger Fruentimmerregistre under overskriften: ", overskrift_el_forbrydelse,
+                                "\nTekst: ", Text,
+                                sep = ""))
+
+samlet <- rbind(regulære,fruentimmer)
+
+df <- samlet %>% 
+  filter(!grepl("^\\s*$", name)) %>% 
+  mutate(name =
+           str_remove_all(name, "# note: the value you produce must adhere to the JSON schema: \\{\"anyOf\": \\[\\{\"type\": \"string\"\\}, \\{\"type\": \"null\"\\}\\]\\}|Null|Andre Meddelelser|Et Fruentimmer|Fruentimmeret |Fruentimmer|Dreng(e|en|ene)|En Dreng|En Person|P. E.|Mandsperson|P. E. Mandsperson(en)|A. Almindelige Efterretninger|^Aar$|^Aarer$"),
+         name = str_replace(name, "^, |^,$", ""),
+         name = na_if(trimws(name), ""),
+         origins = str_remove_all(origins, "# note: the value you produce must adhere to the JSON schema: \\{\"anyOf\": \\[\\{\"type\": \"string\"\\}, \\{\"type\": \"null\"\\}\\]\\}"))
+
+names_with_numbers <- df %>% filter(str_detect(name, "\\d{1,5}") == TRUE)
+
+age_df_na <- df %>% filter(is.na(age) & !grepl("Null|Unknown|^\\s*$",age_or_date_of_birth)) %>%
+  select(Text, age, age_or_date_of_birth, year)
+
+columns <- c("dato", "tekst_id", "name", "origins", "year", "age", "birth_year", "Livsbegivenhed", "overskrift_el_forbrydelse")
+
+df_filtered <- df %>%
+  anti_join(age_df_na) %>%
+  anti_join(names_with_numbers) %>% 
+  mutate(birth_year = year - age) %>% 
+  select(columns)
+
+rm(names_with_numbers)
+```
+
+```{r}
+library(readxl)
+
+christianshavn_raw <- read_xlsx("Christianshavn.xlsx")
+
+christianshavn <- read_xlsx("Christianshavn.xlsx") %>% 
+  rowwise() %>% 
+  mutate(Name = str_remove(Name, "\\[w+(?:\\s+\\w+){0,4}\\]"),
+         name_split = str_split(Name, ",|e(l|ll)\\.\\s?| e(l|ll) | s |\\'s| elle(r|s) | født| kaldet | frask. | \\|\\: "),
+         name = case_when(
+           str_length(name_split[1]) < str_length(name_split[2]) & 
+             grepl("(H|h)ustru|Hstru|Hstr.|Htr. |(E|e)nke", name_split[2]) ~ name_split[1],
+           str_length(name_split[1]) > str_length(name_split[2]) ~ name_split[1],
+           str_length(name_split[1]) < str_length(name_split[2]) ~ name_split[2],
+           .default = name_split[1]
+         ),
+         name = str_remove(name, "\\.|\\(w+(?:\\s+\\w+){0,4}\\)|\\([A-Za-z]\\)"),
+         year = as.numeric(str_extract(Date, "\\d{4}")),
+         birth_year = as.integer(year - Age),
+         Person_ID = paste0(Person_ID, "_christianshavn"),
+         civilstand_trans = case_when(
+           Mariatal_status == "Widowed" | Mariatal_status == "widowed" ~ "Enke",
+           Mariatal_status == "Unmarried" ~ "Ugift",
+           Mariatal_status == "Seperated" ~ "Separeret",
+           Mariatal_status == "Married" ~ "Gift",
+           Mariatal_status == "Divorced" ~ "Fraskilt",
+           Mariatal_status == "Engaged" ~ "Forlovet",
+         ),
+         punishment_trans = case_when(
+           Punishment == "Penitentiary" ~ "Tugthuset",
+           Punishment == "Reformatory" ~ "Forbedringshuset"
+         ),
+         prof_trans = case_when(
+           Profession == "Sewing" ~ "Syning",
+           Profession == "Servant" ~ "Tjenestepige",
+           Profession == "None" | Profession == "Unknown" ~ "ingen/ukendt",
+           Profession == "Cleaning" ~ "Rengøring",
+           Profession == "Caretaking" ~ "Opvartning",
+           Profession == "Prostitution" ~ "Prostitution",
+           Profession == "Selling" ~ "Småhandel",
+           Profession == "Labourer" ~ "Arbejdende",
+           Profession == "Entertainment" ~ "Underhold",
+           Profession == "Vagrant" ~ "Betleri",
+           Profession == "Plantage" ~ "Plantagearbejde",
+           Profession == "Receptionist" ~ "Receptionist",
+           Profession == "Poormember" ~ "Fattiglem",
+           Profession == "Fortuneteller" ~ "Spåkone",
+           Profession == "Fishing" ~ "Fiskeri",
+           Profession == "Pensioner" ~ "Pension",
+         ),
+         ending_trans = case_when(
+           Ending_cat == "Pardoned" ~ "Benådet",
+           Ending_cat == "Dead" ~ "Afgået ved døden",
+           Ending_cat == "Released" ~ "Løsladt",
+           Ending_cat == "Nothing registered" ~ "Ikke registreret",
+           Ending_cat == "Abroud" ~ "Udvandring",
+           Ending_cat == "Help from prison" ~ "Hjælp fra fængsel",
+           Ending_cat == "Mistake" ~ "Fejlløsladelse",
+           Ending_cat == "Suicide" ~ "Selvmord",
+         ),
+         upbringing_trans = case_when(
+           Upbringing == "Smallholders" | Upbringing == "Smallhoulders" ~ "hos småfolk",
+           Upbringing == "Mother" ~ "hos moderen",
+           Upbringing == "Home" ~ "i hjemmet",
+           Upbringing == "Unknown" ~ "Ikke angivet",
+           Upbringing == "Fishermen" ~ "hos fiskere",
+           Upbringing == "Militarymen" ~ "hos militærfolk",
+           Upbringing == "Craftsmen" ~ "hos håndværkere",
+           Upbringing == "Labourers" ~ "hos arbejdsfolk",
+           Upbringing == "Parish" ~ "hos sognet",
+           Upbringing == "Relatives" ~ "hos slægtninge",
+           Upbringing == "Servicemen" ~ "hos tjenestefolk",
+           Upbringing == "Poor service" ~ "i dårlig tjeneste",
+           Upbringing == "Strangers" ~ "hos fremmede",
+           Upbringing == "Fosters" ~ "hos plejeforældre",
+           Upbringing == "Managers" ~ "hos managers (?)",
+           Upbringing == "Shipmen" ~ "hos skibsfolk",
+           Upbringing == "Lodgers" ~ "hos logerende",
+           Upbringing == "Farmers" ~ "hos bønder",
+           Upbringing == "servants" | Upbringing == "Servants" ~ "hos tjenestefolk",
+           Upbringing == "Others" ~ "Ikke angivet",
+         ),
+         period_trans = case_when(
+           grepl("∞", Period) ~ "Livstid",
+           grepl("0\\.", Period) ~ paste(as.character(round(12 * as.numeric(Period), 0)), " måneder", sep = ""),
+           grepl("1.159999", Period) ~ "1 år og 4 måneder",
+           Period == "1.5" ~ "1 år og 6 måneder",
+           Period == "2.5" ~ "2 år og 6 måneder",
+           Period == "1.33" ~ "1 år og 4 måneder",
+           Period == "1.25" ~ "1 år og 3 måneder",
+           Period == "3.5" ~ "3 år og 6 måneder",
+           .default = paste(Period, " år", sep = "")
+         ),
+         Crime_category = str_remove(Crime_category, "\\+"),
+         Livsbegivenhed = paste("Indsat i ", punishment_trans, " i Christianshavn Straffeanstalt",
+                                "\nForbrydelse: ", Crime_category,
+                                "\nStraffens varighed: ", period_trans,
+                                "\nAlder: ", as.character(Age), ", Civilstand: ", civilstand_trans,
+                                "\nOpvokset ", upbringing_trans,
+                                "\nFødested: ", Birthplace,
+                                "\nArresteret i/ved/på: ", Arrestplace,
+                                "\nAfslutning på fængselsophold: ", ending_trans,
+                                "\nErhverv: ", prof_trans, 
+                                "\nLevnedsbeskrivelse: ", Full_transcriptions,
+                                sep = "")) %>% 
+  select(Date, Person_ID, name, Birthplace, year, Age, birth_year, Livsbegivenhed, Crime_category) %>% 
+  rename(tekst_id = Person_ID,
+         dato = Date,
+         age = Age,
+         origins = Birthplace,
+         overskrift_el_forbrydelse = Crime_category) %>% 
+  filter(year >= 1867 & year <= 1890)
+
+vridsløselille_raw <- read_xlsx("Vridsløselille.xlsx")
+
+vridsløselille <- read_xlsx("Vridsløselille.xlsx") %>% 
+  rowwise() %>% 
+  mutate(name_split = str_split(Navn, ", | eller | kaldet | ogsaa | ogsaa kaldet | el. |\\. |\\- | med "),
+         name = name_split[1],
+         name = str_remove_all(name, "\\(w+\\)|\\.|,"),
+         year = as.numeric(str_extract(Afleveret, "\\d{4}")),
+         birth_year = as.numeric(year - Alder),
+         dato_split = str_split(Afleveret, "\\/"),
+         dag = ifelse(as.numeric(dato_split[1]) >= 10,
+                      paste(dato_split[1]),
+                      paste0("0",dato_split[1])),
+         måned = ifelse(as.numeric(dato_split[2]) >= 10,
+                      paste(dato_split[2]),
+                      paste0("0",dato_split[2])),
+         år = dato_split[3],
+         dato = paste(år,måned,dag,sep = "-"),
+         ID = paste0(ID, "_vridsløselille"),
+         Forbrydelse = str_remove(Forbrydelse, "\\+"),
+         Livsbegivenhed = paste("Indsat i Vridsløselille",
+                                "\nForbrydelse: ", Forbrydelse,
+                                "\nStraffens udløbsdato: ", Udløber,
+                                "\nTidligere straf: ", Tidligere_straffet,
+                                "\nAlder: ", Alder, ", Civilstand: ", Gift, ", Børn: ", Børn,
+                                "\nFødested: ", Fødested,
+                                "\nSidste opholdssted: ", Sidste_opholdssted,
+                                "\nForsørgelsessted: ", Forsørgelsessted,
+                                "\nErhverv: ", Næringsvej_org,
+                                "\nVærnepligtig: ", Værnepligtig,
+                                "\nKendetegn: ", Kendetegn,
+                                "\nLevnedsbeskrivelse: ", Levned,
+                                sep = "")) %>% 
+  select(dato, ID, name, Fødested, year, Alder, birth_year, Livsbegivenhed, Forbrydelse) %>% 
+  rename(tekst_id = ID,
+         dato = dato,
+         age = Alder,
+         origins = Fødested,
+         overskrift_el_forbrydelse = Forbrydelse) %>% 
+  filter(year >= 1867 & year <= 1890)
+
+horsens_raw <- read_xlsx("Rigsarkivet_rigsarkivet_version-2.0_std_fanger_horsens-statsfaengsel_1853_1909_marts_2021.xlsx")
+
+horsens <- horsens_raw %>% 
+  rowwise() %>% 
+  mutate(
+  dato = format(as.Date(Indsættelsesdato, format = "%d-%m-%Y"), "%Y-%m-%d"),
+  year = year(dato),
+  Navn = str_remove_all(Navn, "\"|\\/"),
+  name_split = str_split(Navn, ", | eller | kaldet | ogsaa | ogsaa kaldet | el. |\\. |\\- | med |\\(| også "),
+  name = name_split[1],
+  straftype = ifelse(is.na(Straftype), " ", paste0(" ", Straftype, "et i ")),
+  ID = paste0(Id, "_horsens"),
+  straflængde_måneder = case_when(
+    `Straflængde (måned)` == "Livstid" ~ "Livstid",
+    grepl("\\d+",`Straflængde (måned)`) ~ paste0(`Straflængde (måned)`, " måneder"),
+    .default = NA
+  ),
+  forbrydelse_split = str_split(Forbrydelse, "\\§"),
+  forbrydelse = forbrydelse_split[1],
+  forbrydelse = str_remove_all(forbrydelse, "\\,|\\?"),
+  Livsbegivenhed = paste0("Indsat i", straftype, "Horsens Statsfængsel",
+                          "\nForbrydelse: ", forbrydelse,
+                          "\nStraffens længde: ", straflængde_måneder,
+                          "\nAlder: ", `Alder på indsættelsestidspunkt`, ", Civilstand: ", Civilstand,
+                          "\nFødested: ", Fødested,
+                          "\nSidste opholdssted: ", `Sidste opholdssted`,
+                          "\nErhverv: ", Erhverv,
+                          "\nLevnedsbeskrivelse: ", `Yderligere tekst i dokumentet`),
+  birth_year = year - `Alder på indsættelsestidspunkt`) %>% 
+  filter(year >= 1867, year <= 1890) %>% 
+  select(dato, ID, name, Fødested, year, `Alder på indsættelsestidspunkt`, birth_year, Livsbegivenhed, forbrydelse) %>% 
+  rename(tekst_id = ID,
+         age = `Alder på indsættelsestidspunkt`,
+         origins = Fødested,
+         overskrift_el_forbrydelse = forbrydelse)
+
+fængsler_samlet <- rbind(christianshavn, vridsløselille, horsens)
+```
+
+```{r}
+df_filtered_2 <- rbind(df_filtered,fængsler_samlet) %>% 
+  mutate(
+    birth_min = birth_year - 1,
+    birth_max = birth_year + 2
+  )
+
+year_blocks <- lapply(sort(unique(df_filtered_2$birth_year)), function(y) {
+  df_filtered_2 %>%
+    filter(birth_year >= y-1 & birth_year <= y+2)
+})
+
+all_links <- lapply(year_blocks, function(df_block) {
+  stringdist_inner_join(
+    df_block, df_block,
+    by = "name",
+    method = "jw",
+    max_dist = 0.05
+  ) %>%
+    filter(tekst_id.x != tekst_id.y) %>% 
+    filter(abs(birth_year.x - birth_year.y) <= 2)
+})
+
+all_links <- bind_rows(all_links)
+```
+
+```{r}
+library(igraph)
+
+edges <- all_links %>% 
+  transmute(from = tekst_id.x, to = tekst_id.y) %>% 
+  distinct()
+
+G <- graph_from_data_frame(edges, directed = FALSE)
+
+comp <- components(G)
+
+person_map <- tibble(
+  tekst_id = names(comp$membership),
+  person_id = comp$membership
+)
+
+df_samlet <- df_filtered_2 %>%
+  left_join(person_map, by = "tekst_id")
+```
+
+```{r}
+individuelle_personer <- df_samlet %>% 
+  group_by(person_id) %>% 
+  summarise(n = n(),
+            name = paste(name[1]))
+```
+
+```{r}
+all_links <- lapply(year_blocks, function(df_block) {
+  stringdist_inner_join(
+    df_block, df_block,
+    by = "name",
+    method = "jw",
+    max_dist = 0.05,
+    distance_col = "dist"
+  ) %>%
+    filter(tekst_id.x != tekst_id.y) %>% 
+    filter(abs(birth_year.x - birth_year.y) <= 2)
+})
+
+all_links <- bind_rows(all_links)
+
+# --- Step 3: Build the graph from edges ---
+edges <- all_links %>% 
+  transmute(from = tekst_id.x, to = tekst_id.y) %>% 
+  distinct()
+
+G <- graph_from_data_frame(edges, directed = FALSE)
+
+comp <- components(G)
+
+person_map <- tibble(
+  tekst_id = names(comp$membership),
+  person_id = comp$membership
+)
+
+df_samlet <- df_filtered_2 %>%
+  left_join(person_map, by = "tekst_id")
+
+individuelle_personer <- df_samlet %>% 
+  group_by(person_id) %>% 
+  summarise(n = n(),
+            name = paste(name[1]),
+            birth_year_min = min(birth_year),
+            birth_year_max = max(birth_year),
+            range = max(birth_year) - min(birth_year))
+
+big_components <- individuelle_personer %>% 
+  filter(range >= 5) %>% 
+  pull(person_id)
+
+```
+
+```{r}
+safe_jw <- function(a, b) {
+  if (is.na(a) || is.na(b)) return(Inf)
+  stringdist(a, b, method = "jw")
+}
+
+recluster_component <- function(df) {
+
+  df <- df %>%
+    mutate(origins_trunc = str_sub(origins, 1, 8)) %>%
+    arrange(name, origins, birth_year)
+
+  n <- nrow(df)
+  new_cluster <- integer(n)
+  cluster_id <- 1
+  new_cluster[1] <- cluster_id
+
+  for (i in 2:n) {
+
+    name_sim   <- safe_jw(df$name[i], df$name[i-1]) <= 0.05
+    origin_sim <- safe_jw(df$origins_trunc[i], df$origins_trunc[i-1]) <= 0.15
+
+    age_close <- if (!is.na(df$birth_year[i]) && !is.na(df$birth_year[i-1])) {
+      abs(df$birth_year[i] - df$birth_year[i-1]) <= 1
+    } else {
+      FALSE
+    }
+
+    if (name_sim && age_close && origin_sim) {
+      new_cluster[i] <- cluster_id
+    } else {
+      cluster_id <- cluster_id + 1
+      new_cluster[i] <- cluster_id
+    }
+  }
+
+  df$new_cluster <- new_cluster
+
+  df$origins_trunc <- NULL
+  return(df)
+}
+```
+
+```{r}
+df_fixed <- df_samlet %>%
+  group_split(person_id) %>%
+  map_dfr(function(df_comp) {
+
+    old_id <- unique(df_comp$person_id)
+
+    if (old_id %in% big_components) {
+
+      df_new <- recluster_component(df_comp)
+
+      df_new$person_id <- old_id * 10000 + df_new$new_cluster
+      df_new$new_cluster <- NULL
+      df_new
+
+    } else {
+      df_comp
+    }
+  })
+
+```
+
+```{r}
+individuelle_personer_fixed <- df_fixed %>% 
+  group_by(person_id) %>% 
+  summarise(n = n(),
+            name = paste(name[1]),
+            birth_year_min = min(birth_year),
+            birth_year_max = max(birth_year),
+            range = max(birth_year) - min(birth_year))
+
+name_age_certainty <- df_fixed %>% 
+  filter(!is.na(person_id)) %>% 
+  group_by(name, birth_year) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n)) %>%
+  ungroup() %>%
+  mutate(age_name_certainty = 1 - (n - 1) / (max(n) - 1)) %>% 
+  select(name, birth_year, age_name_certainty)
+
+df_fixed_2 <- df_fixed %>% 
+  filter(!is.na(person_id)) %>% 
+  left_join(name_age_certainty,
+            by = c("name", "birth_year"))
+
+write.csv(df_fixed_2, "all_links_person_graf_id.csv")
+```
+
+```{r}
+graffffff <- read.csv("all_links_person_graf_id.csv")
+```
+
+Loop der linker til samme år
+
+```{r}
+# 
+# years <- sort(unique(df_filtered$year))
+# 
+# same_year_links <- list()
+# 
+# for(y in years) {
+#   df_y <- df_filtered %>% filter(year == y)
+#   
+#   matches_same_year <- stringdist_inner_join(
+#     df_y, df_y,
+#     by = "name",
+#     method = "jw",
+#     max_dist = 0.05) %>% 
+#     filter(row_number.x < row_number.y) %>% 
+#     filter(abs(birth_year.x - birth_year.y) <= 2) %>% 
+#     mutate(filter_off = case_when(
+#       lag(tekst_id.x) == tekst_id.x & lag(dato.x) == dato.x ~ 1,
+#       .default = 0
+#     )) %>% 
+#     filter(filter_off != 1) %>% 
+#     select(-filter_off)
+#   
+#   same_year_links[[as.character(y)]] <- matches_same_year
+# }
+```
+
+Loop der linker parvist på tværs af år
+
+Jeg etablerer forskellige strenghedsniveauer af linking - en bare på navn, en på alder + navn og en på alder + navn + origins
+
+```{r}
+# 
+# link_results <- list()
+# link_results_agefit <- list()
+# link_results_originfit <- list()
+# 
+# for(i in seq_along(years[-length(years)])) {
+#   y1 <- years[i]
+#   y2 <- years[i+1]
+#   
+#   
+#   df1 <- df_filtered %>% filter(year == y1)
+#   df2 <- df_filtered %>% filter(year %in% c(y1+1, y1+2, y1+3))
+#   
+#   matches <- stringdist_inner_join(
+#   df1, df2,
+#   by = "name",
+#   method = "jw",
+#   max_dist = 0.05)
+# 
+#   
+#   matches_age <- matches %>% 
+#     filter(between(birth_year.y - birth_year.x, -2, 2)) %>% 
+#     mutate(
+#       filter_off = case_when(
+#         lag(tekst_id.x) == tekst_id.x &
+#           lag(dato.x) == dato.x &
+#           as.numeric(ymd(dato.y) - lag(ymd(dato.y))) > 0 
+#         ~ 1,
+#         .default = 0
+#     )) %>% 
+#     filter(filter_off != 1) %>% 
+#     select(-filter_off)
+#   
+#   matches_originfit <- matches_age %>% 
+#     filter(stringdist(origins.x, origins.y ,
+#                       method = "jw") <= 0.2)
+#   
+#   link_results[[paste(y1, y2, sep = "_")]] <- matches
+#   
+#   link_results_agefit[[paste(y1, y2, sep = "_")]] <- matches_age
+#   
+#   link_results_originfit[[paste(y1, y2, sep = "_")]] <- matches_originfit
+# }
+```
+
+```{r}
+# links_fængsler <- stringdist_inner_join(
+#   df_filtered %>% select(-row_number), fængsler_samlet,
+#   by = "name",
+#   method = "jw",
+#   max_dist = 0.05,
+#   distance_col = "dist"
+# ) %>% 
+#   filter(
+#     abs(birth_year.x - birth_year.y) <= 2
+#   ) %>% 
+#   mutate(link_type = "cross_material")
+```
+
+```{r}
+# same_year_links_long <- bind_rows(same_year_links) %>% 
+#   select(c(dato.x, tekst_id.x, name.x, origins.x, age.x, year.x, Livsbegivenhed.x, overskrift_el_forbrydelse.x,
+#            dato.y, tekst_id.y, name.y, origins.y, age.y, year.y, Livsbegivenhed.y,  overskrift_el_forbrydelse.y)) %>% 
+#   mutate(link_type = "same_year")
+# 
+# cross_links_long <- bind_rows(link_results_agefit) %>% 
+#   select(c(dato.x, tekst_id.x, name.x, origins.x, age.x, year.x, Livsbegivenhed.x,overskrift_el_forbrydelse.x,
+#            dato.y, tekst_id.y, name.y, origins.y, age.y, year.y, Livsbegivenhed.y,overskrift_el_forbrydelse.y)) %>% 
+#   mutate(link_type = "cross_year")
+# 
+# all_links <- rbind(same_year_links_long, cross_links_long, links_fængsler) %>%
+#   mutate(row_id = row_number(),
+#          birth_year = as.numeric(str_extract(dato.x, "\\d{4}")) - age.x) %>% 
+#   arrange(name.x)
+```
+
+```{r}
+# jw_threshold <- 0.05
+# year_tol <- 1
+# 
+# person_id <- integer(nrow(all_links))
+# current_id <- 1
+# person_id[1] <- current_id
+# 
+# for (i in 2:nrow(all_links)) {
+#   dist <- stringdist(all_links$name.x[i], all_links$name.x[i - 1], method = "jw")
+#   year_diff <- abs(all_links$birth_year[i] - all_links$birth_year[i - 1])
+#   
+#   if (dist < jw_threshold && year_diff <= year_tol) {
+#     person_id[i] <- current_id
+#   } else {
+#     current_id <- current_id + 1
+#     person_id[i] <- current_id
+#   }
+# }
+# 
+# all_links$person_id <- person_id
+```
+
+```{r}
+# certainty_name <- all_links %>% 
+#   group_by(name.x) %>% 
+#   summarise(n = n()) %>% 
+#   arrange(desc(n)) %>% 
+#   ungroup() %>% 
+#   mutate(name_certainty = 1 - (n - 1) / (max(n) - 1))
+```
+
+```{r}
+# certainty_age <- all_links %>% 
+#   group_by(name.x, age.x) %>% 
+#   summarise(n = n()) %>% 
+#   arrange(desc(n)) %>% 
+#   ungroup() %>% 
+#   mutate(age_name_certainty = 1 - (n - 1) / (max(n) - 1)) %>% 
+#   left_join(certainty_name,
+#             by = c("name.x"))
+```
+
+```{r}
+# all_links_2 <- left_join(all_links, certainty_age,
+#                   by = c("name.x", "age.x")) %>% 
+#   select(-c(n.x, n.y, name_certainty)) %>% 
+#   mutate(age.x = as.integer(age.x))
+# 
+# write.csv(all_links_2, "all_links_person_id.csv")
+```
+
+```{r}
+# df_app <- read.csv("all_links_person_id.csv")
+# 
+# x_cols <- names(df_app)[str_detect(names(df_app), "\\.x$")]
+# y_cols <- names(df_app)[str_detect(names(df_app), "\\.y$")]
+# 
+# df_x <- df_app %>%
+#   select(all_of(x_cols), person_id) %>%
+#   rename_with(~ str_remove(.x, "\\.x$")) %>%
+#   mutate(type = "x")
+# 
+# df_y <- df_app %>%
+#   select(all_of(y_cols), person_id) %>%
+#   rename_with(~ str_remove(.x, "\\.y$"))
+# 
+# df_long <- bind_rows(df_x, df_y)
+# 
+# df_long_filtered <- df_long %>%
+#   group_by(person_id) %>%
+#   distinct(Livsbegivenhed, .keep_all = TRUE) %>%
+#   ungroup()
+```
+
+```{r}
+# --- Construct unified edge list --------------------------------------------
+# edge_same_year <- bind_rows(same_year_links) %>%
+#   transmute(from = tekst_id.x, to = tekst_id.y)
+# 
+# edge_cross_year <- bind_rows(link_results_agefit) %>%
+#   transmute(from = tekst_id.x, to = tekst_id.y)
+# 
+# edge_cross_material <- links_fængsler %>%
+#   transmute(from = tekst_id.x, to = tekst_id.y)
+# 
+# # Combine all edges
+# all_edges <- bind_rows(
+#   edge_same_year,
+#   edge_cross_year,
+#   edge_cross_material
+# ) %>% distinct()
+```
+
+```{r}
+# library(igraph)
+# 
+# # Create graph from edges
+# G <- graph_from_data_frame(
+#   all_edges,
+#   directed = FALSE
+# )
+
+```
+
+```{r}
+# comp <- components(G)
+# 
+# person_map <- tibble(
+#   tekst_id = names(comp$membership),
+#   person_id = comp$membership
+# )
+```
+
+```{r}
+# df_samlet <- rbind(df_filtered %>%
+#                      select(columns),
+#                    fængsler_samlet %>% 
+#                      select(columns)) %>% 
+#   left_join(person_map, by = "tekst_id")
+# 
+# individuelle_personer <- df_samlet %>% 
+#   group_by(person_id) %>% 
+#   summarise(n = n(),
+#             name = paste(name[1]))
+```

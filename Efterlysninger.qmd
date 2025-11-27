@@ -1,0 +1,528 @@
+---
+title: "Efterlysninger"
+format:
+  html:
+    standalone: true
+execute: 
+  echo: true
+  eval: false
+editor: visual
+---
+
+Denne notebook beskriver vores forsøg på at undersøge og berige vores datasæt med efterlysninger. Datasættet er på forhånd skabt gennem et klassifikationsmodel, der har gennemgået alle tekster fra Politiets Efterretninger og fundet personefterlysningerne. Denne model har en høj præcision og genkaldelse, så datasættet indeholder stort set kun faktiske efterlysninger. I de første skridt fjerner vi dog enkelte aflysninger og andre tekster, ved at filtrere datasættet på senest identificere overskrift, således at kun tekster fra rubrikkerne "Efterlysninger" og "Andre meddelelser" kommer med i den endelige version.
+
+Vores læsninger er guidet af nogle overordnede betragtninger om genren:
+
+1.  Den er gammel - med et dybt spor ind i 1700-tallets trykte mediers historie, hvor efterlysninger var en tilbagevendende genre. Vi tænker dermed dele af efterlysningernes sprog som gammelt - også ældre end den politiinstution, der her tager det i brug.
+
+2.  Den indeholder givetvis oplysninger om mange forskellige mennesker, hvilket vi gerne vil kunne bruge, når materialet navigeres.
+
+3.  Den har haft flere overlappende funktioner - herunder også fremlysning, hvor det efterlyste er oplysninger om en person, der faktisk er fundet (f.eks. død).
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(umap)
+library(word2vec)
+library(doc2vec)
+library(quanteda)
+library(tidytext)
+library(dbscan)
+library(tidygraph)
+library(ggraph)
+library(widyr)
+
+df <- read_csv("Positive_forudsigelser.csv") %>% 
+  filter(Text != seneste_overskrift) %>%
+  filter(str_detect(seneste_overskrift, "lysning|eddelelse")) %>% 
+  filter(!str_detect(seneste_overskrift, "(A|a)flys")) %>%
+  mutate(text = str_to_lower(Text)) %>% 
+  select(-predicted_label)
+```
+
+## Simple materiale-specifikke sprogmodeller
+
+For at bearbejde materiale ønsker vi at skabe vektorrepræsentationer af det. Og vi ønsker os, at disse repræsentationer er så materialespecifikke som muligt. Selvom der findes gode og moderne embedding-modeller, skaber vi i stedet vores egne, for at få en repræsentation, der afspejler det konkrete materiale og dets tendenser.
+
+Første skridt er at tokenisere datasættet og træne en word2vec-model. Vi tester den til sidst ved at søge på et søgeord.
+
+```{r}
+toks <- df$text %>%
+  tokens(remove_punct = TRUE,
+         remove_symbols = TRUE,
+         remove_numbers = TRUE) %>% as.list()
+
+set.seed(1234)
+
+w2v <- word2vec(toks, 
+                type = "skip-gram",
+                dim = 150,
+                hs = TRUE,
+                lr = 0.05,
+                iter = 15,
+                threads = 4,
+                sample = 0.001,
+                min_count = 3,
+                window = 5,
+                verbose = TRUE)
+
+søgeords_naboer <- predict(w2v, "vagabond", type = "nearest", top_n = 20) %>% as.data.frame()
+```
+
+Dette skaber en oversigt, der ser således ud:
+
+![](billedfiler/Skærmbillede%202025-11-05%20kl.%2014.24.46.png)
+
+Dette kan hjælpe os til at finde slægtskaber imellem ord eller guide vores søgning ved at foreslå pseudonymer. Det bliver relevant senere.
+
+Vi bruger imidlertid først disse embeddings som basis for en paragraph2vec-model. Denne forudsiger teksters ord med udgangspunkt i en dokument-vektor.
+
+```{r}
+embeddings <- as.matrix(w2v)
+
+df_prepped <- df %>% 
+  mutate(text = Text,
+         doc_id = tekst_id,
+         text = str_sub(text, 1, 5000), # nok ikke nødvendigt her, men godt at huske...
+         text = tolower(text),
+         text = str_replace_all(text, "\\d+", ""),
+         text = str_replace_all(text, " \\.", "\\."),
+         text = gsub("[[:space:]]+", " ", text),
+         text = trimws(text)) %>%
+    select(text, doc_id)
+
+df_prepped <- df_prepped %>% na.omit() # Modellen kan ikke lide NA
+
+doc_vec_model <- paragraph2vec(df_prepped, 
+                               threads = 5,
+                               hs = TRUE,
+                               iter = 15,
+                               sample = 0.001,
+                               dim = 150,
+                               min_count = 3,
+                               embeddings = embeddings)
+
+write.paragraph2vec(doc_vec_model, "extraordinaire_vecs_150.bin")
+```
+
+Vores model skaber en repræsentation af hver tekst i 150 dimensioner, men med henblik på visualisering og klyngeidentifikation, reducerer vi antallet af dimensioner med henblik på at identificere klynger af tekster. Dette gør vi med umap, der laver det materialespecifikke embeddings-space om til en grafstruktur, hvor tekster knyttes til deres nærmeste naboer - altså de tekster, der har lignende vektorrepræsentationer. Fordelene ved dette er blandt andet, at det gør det muligt, at visualisere teksters placering i klynger, der vil fremstå som fortætninger i det nye to-dimensionelle rum.
+
+```{r warning = FALSE}
+doc_vec_model <- read.paragraph2vec("extraordinaire_vecs_150.bin")
+
+samlet_emb_docs <- as.matrix(doc_vec_model, type = "docs") # tjek, at den har matchende antal rækker med df
+
+umap_embeddings <- umap(as.matrix(samlet_emb_docs),
+                        n_neighbors = 25,
+                        preserve.seed = TRUE,
+                        metric = "cosine",
+                        min_dist = 0.05, # default-værdien er 0.1
+                        verbose = TRUE)
+
+umap_koordinater <- as.data.frame(umap_embeddings$layout)
+
+df2 <- df %>% 
+  cbind(umap_koordinater)
+
+ggplot(df2) +
+  geom_point(aes(x = V1, y = V2), size = 0.1) +
+  ylim(-8, 8) + xlim(-8, 8)
+```
+
+Vi kan dermed kigge på vores embeddingsspace, i dets reducerede format:
+
+![](billedfiler/Skærmbillede%202025-11-05%20kl.%2014.25.40.png)
+
+Vi ser en god adskillelse i et meningsfuldt antal klumper. Derfor går vi videre med denne version. Bemærk, at der også er nogle små klumper, der falder ud af visualiserings ramme, fordi de er meget særegne og derfor ikke forbundet til den øvrige graf.
+
+Med henblik på at gøre fortætninger i materialet til basis for klynger, benytter vi hdbscan - en clustering-algoritme, der netop leder efter fortætninger. Vi forsøger at ramme nogle indstillinger, hvor antallet af identificerede clusters svarer nogenlunde til, hvad vi ser på grafen.
+
+```{r warning = FALSE}
+hdbscan_resultater <- hdbscan(as.matrix(umap_embeddings$layout),
+                              minPts = 100,
+                              cluster_selection_epsilon = 0.2,
+                              verbose = TRUE)
+
+df3 <- df2 %>% 
+  cbind(as.data.frame(hdbscan_resultater$cluster)) %>% 
+  rename(clusters = `hdbscan_resultater$cluster`)
+
+centroids <- df3 %>%
+  filter(clusters != 0) %>%
+  group_by(clusters) %>%
+  summarise(centroid_x = mean(V1), centroid_y = mean(V2))
+
+df3 %>% select(clusters, tekst_id) %>% writexl::write_xlsx("clusters.xlsx")
+
+ggplot(df3) +
+  geom_point(aes(x = V1, 
+                 y = V2, 
+                 colour = as.character(clusters)), 
+             size = 0.001) +
+  geom_point(
+    data = filter(df3, str_detect(Text, regex("hjemmet", ignore_case = TRUE))),
+    aes(x = V1, y = V2),
+    color = "black", size = 1, shape = 21, stroke = 1) +
+  geom_label(data = centroids, 
+             aes(x = centroid_x, 
+                 y = centroid_y, 
+                 label = clusters), 
+             size = 3, 
+             alpha = 0.5) +
+  labs(color = "Cluster") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  ylim(-7.5, 7.5) + xlim(-7.5, 7.5)
+```
+
+![](billedfiler/Skærmbillede%202025-11-05%20kl.%2014.27.30.png)
+
+De røde prikker er outliers ifølge clustering-algoritmen. De sorte prikker matcher et søgeord, i dette tilfælde "hjemmet" - som vi ofte finder italesat i forbindelse med bekymring for børn, der har forladt deres hjem.
+
+For at få en fornemmelse for, hvad klyngerne handler om, kigger vi på term-frequency inverse-document-frequency. En score, der i denne kontekst kommer til at repræsentere hvilke ord, der er højfrekvente i den enkelte klynge, men typisk ikke er det i det resterende korpus.
+
+```{r}
+klynger_ord <- df3 %>%
+  group_by(clusters) %>% 
+  summarise(samlet_text = paste(Text, collapse = " ")) %>% 
+  unnest_tokens(ord, samlet_text) %>% 
+  count(clusters, ord)
+
+klynger_top_tf_idf <- klynger_ord %>%
+  bind_tf_idf(ord, clusters, n) %>% 
+  filter(n > 6) %>% 
+  group_by(clusters) %>% 
+  slice_max(tf_idf, n = 30) %>% 
+  summarise(særlige_ord = paste(ord, collapse = "; ")) %>% 
+  filter(clusters != 0)
+
+klynger_top_tf_idf$særlige_ord
+```
+
+```         
+ [1] "udskrivningskreds; kreds; bekjendte; lægd; militær; værnepligtig; indkaldt; rekrut; indkaldte; sidst; sidstbekjendte; værnepligtige; tjeneste; opholdsted; sal; 1ste; stuen; efternævnte; 1861; 1863; opholdssted; 1865; født; 1860; arbejdskarl; g; frederiksberg; maskinarbeider; tjenestekarl; opvarter"                                               
+ [2] "vaabenfrakke; kompagniet; kompagni; afdeling; bataillons; komp; menig; felthue; rekrut; afdelingen; kaserne; pioner; uniform; sabelbajonet; ingeniørregimentets; batteri; absenteret; kirsais; emblem; kasernen; citadellet; lægd; feltkappe; sølvgadens; batl; sabel; artilleribataillons; garnisonen; fortet; udskrivningskreds"                        
+ [3] "kjole; shavl; boutikstyveri; hovedtørklæde; overstykke; slør; kurv; sort; kyse; butikstyveri; armen; straahat; kaabe; gaden; aar; nederdel; fruentimmer; børn; dameklædt; bomuldskjole; hun; graat; bedrageri; hat; havelock; slag; navngivet; forklæde; besætning; jaket"                                                                                
+ [4] "liget; fandtes; afdøde; vandet; underbenklæder; skjønnes; fundet; druknet; henligger; opløst; funden; overbord; liighuset; ligets; udfor; skjønnedes; langebro; forraadnet; seler; mandsperson; undertrøie; hængt; afdødes; uldne; vævede; henligget; ligget; mrk; ubekjendt; hvo; hængning; lighuset"                                                    
+ [5] "hjemmet; drengen; forulykket; kaskjet; sort; sal; udebleven; lære; vendt; bortgaaet; trøje; hjem; rundpuldet; aar; skotsk; tilbage; strømper; fjedersko; tilstand; vest; senere; vinterfrakke; stuen; aflivet; sit; kapsko; sindsforvirret; siden; fuldskjæg; udstaaende"                                                                                 
+ [6] "kjole; hjemmet; pigen; hun; shavl; pigebarnet; vilhelmine; christine; bomuldskjole; overstykke; sort; nederdel; straahat; kondition; tjenestepige; aflivet; hospital; besætning; sal; marie; kaabe; ulden; fjer; jaket; caroline; hovedtørklæde; anna; bortgaaet; udebleven; tilstand"                                                                    
+ [7] "alimentanter; bekjendte; fleskum; sidst; kommune; fattigudvalget; herred; opholdsted; 1889; tjenestekarl; herredsfogden; 1888; kjellerup; politi; herreder; sogneraad; tjente; fl; født; opholdssted; fæstningsværkerne; sidstbekjendte; kjær; juni; lemvig; hvetbo; flyttede; opholdt; april; marts"                                                     
+ [8] "bøde; politikasse; afsoning; betaling; simp; mangel; hensat; fængsel; afsoningsordre; skylder; henhold; ordre; afkrævet; bøden; stiftamts; affordret; resolution; bøder; kjøbstads; simpelt; politikassen; statskassen; vedtagen; afsonet; hensatte; bødens; amtets; foranstaltet; dages; skylde"                                                         
+ [9] "idag; mandsperson; koster; stjaalet; kaskjet; læderfodtøj; frakke; sort; stiaalet; uhr; rundpuldet; efterlyste; hat; aar; rundpullet; talte; vinterfrakke; skjæg; have; mistænkt; beskrives; kindskjæg; træsko; flad; mørke; overskjæg; støvler; ca; hele; højde; intet; søndre"                                                                          
+[10] "mandspersoner; drenge; klædte; anden; alderen; to; rundpuldede; ene; iførte; velklædte; rundpuldet; jakker; filthatte; læderfodtøj; høiere; kaskjet; byggede; kaskjetter; indbrud; aar; sort; mindre; begge; middelhøje; hatte; sværere; grovt; hat; middelhøjde; højde"                                                                                  
+[11] "mandsperson; rundpuldet; læderfodtøj; sort; uterlighed; aar; lignede; grovt; dreng; højde; vinterfrakke; skjæg; kvistkammer; navngivet; middelhøjde; indbrud; hat; ordentlig; kaskjet; intet; bedrageri; opførelse; overskjæg; kvistkamre; kjøkkener; frakke; ca; jakkeklædning; fuldskjæg; kvistkammertyveri"                                            
+[12] "belønning; politiøvrigheden; udlovet; maal; dollars; paagribelse; statsanklageren; statsadvokaten; paagribelsen; thlr; frankfurt; thaler; bortrømt; underslæb; fod; landretten; stadsfiskalen; efterlyses; wien; pande; øjenbryn; rmk; postassistent; bank; fallit; gylden; bremen; allg; politipræsidiet; flensborg"                                     
+[13] "mandsperson; kaskjet; middelhøi; frakke; stortrøie; buxer; aar; sort; middelhøide; bedrageri; skjæg; høide; beenklæder; hat; bluse; intet; arbeidsmand; rundpullet; omtrent; høi; mørk; do; magert; lyse; talte; flad; halstørklæde; ansigt; blank; siderne"                                                                                              
+[14] "kaskjet; mandsperson; tyveriet; iii; frakke; middelhøi; stortrøie; bakkenbarter; arbeidsmand; kasket; bedrageri; sort; aar; flad; kjøbenh; fortyveriet; ii; barter; efterl; høide; skjæg; middelhøide; iv; stat; lyse; intet; høi; militair; øine; hat"                                                                                                   
+[15] "bedrageri; hertil; sort; politi; aar; hyresvig; rundpuldet; protokollen; født; kaskjet; overskjæg; skrædersvend; skjæg; middelhøjde; intet; hyrebesvigelse; højde; vinterfrakke; hat; frakke; staden; stortrøje; fuldskjæg; mist; do; læderfodtøj; mistænkelige; rundpullet; henhører; skomagersvend"                                                     
+[16] "kjole; shavl; tjenestepige; marie; overstykke; pigen; christine; hun; sort; vilhelmine; slør; caroline; emilie; straahat; besætning; hertil; jaket; nederdel; cathinka; bedrageri; anna; frederikke; hovedtørklæde; kaabe; theodora; skjørt; havelock; bomuldskjole; jacobine; karen"                                                                     
+[17] "hun; kjole; skjørt; hovedtørklæde; laante; pigen; shavl; besætning; frynser; kirstine; hendes; uldent; forklæde; underskjørt; marie; sort; laant; bomuldsforklæde; kaabe; medtagende; hende; silkekyse; hvergarns; herredsfogden; tjeneste; bomuldskjole; gjenstande; frastiaalet; tørklæde; nederdel"                                                    
+[18] "deserteret; værnepligtig; new; sørullen; york; deserterede; newcastle; liverpool; værnepligtige; antwerpen; hull; lægdsrullen; rullen; skibet; lov; skonnerten; udbedes; tiltalt; skibsfører; rotterdam; helbefaren; opholdsted; rømning; london; begjært; tiltales; rømmet; 1866; forhyret; optagne"                                                     
+[19] "gjentages; efterlysningen; anm; endnu; tilføjende; rettelig; bemærkning; herved; medd; rettet; aflyses; antruffen; da; kfr; ommeldte; efterlysning; efterlyste; efterlysningerne; angaaende; meddeles; paany; fulde; hedder; modtagen; herreder; forbindelse; hun; identisk; erindring; efterspurgte"                                                     
+[20] "tvangspas; opmærksomhed; politiøvrighedernes; hjemskreven; arbejdsløs; udstaaet; politiøvrigheders; forsørgelseskommune; straf; ernærende; løsgængeri; driver; hjemsendt; henleder; ankommen; betleri; meldt; løsgænger; strejfe; subsistentsmidler; ham; henledes; forsørgelsested; hjemskrevet; afgik; betler; fyenske; passet; paalæg; fattiggaard"    
+[21] "idag; koster; søndre; afleveres; birks; sort; rundpuldet; frakke; tjenestekarl; bedrageri; kaskjet; arbejdskarl; læderfodtøj; uhr; aar; stjaalet; svensk; overskjæg; højde; anh; kontor; oftere; stortrøje; straffet; skjæg; medtjener; født; amts; hat; do"                                                                                              
+[22] "løsgængertilhold; overtraadt; bortstjaalet; polititilhold; kaskjet; fattiggaard; sort; arbejdsanstalt; derved; frakke; herredsfogden; brystlomme; tilladelse; uldsokker; fattiggaarden; fattiglem; romertal; tvistlærreds; transporteres; udv; anstaltens; foret; mrk; indv; knapper; aar; buxer; bortgangen; kontor; buckskins"                          
+[23] "kost; affordret; betaling; gjæld; beløbet; mangel; øre; betaler; beløb; betale; afkrævet; logis; skyld; skyldige; betales; betalingen; hemmelig; hemmeligt; efterladende; afhørt; beløbene; skyldte; telegrafisk; skylder; forskud; strax; saafremt; ialt; affordrede; betalt"                                                                            
+[24] "mønstring; værnepligtig; møde; udeblivelse; værnepligtige; lægdet; bataillon; indkaldt; lægd; mønstringen; batl; vedtegning; kreds; indkaldte; indkaldelsesordre; sessionen; værnepligtslovens; flytning; ikjendt; fængsel; simp; paalæg; tiltales; bataillons; udskrivningskreds; forfald; dikteret; 427; timers; rigtighed"                             
+[25] "dom; kriminal; politirets; fængsel; anset; anseet; x; finde; politirettens; straf; extraretsdom; idømt; politiretsdom; brød; vand; bøde; v; højesteretsdom; ikjendt; simp; forkyndelse; tiltalte; dommens; strls; dømt; straffens; hun; execution; dages; unddraget"                                                                                      
+[26] "anledning; alimentationsbidrags; alimentationssag; opholder; alimentationsbidrag; jndfordring; forsørgelsessag; beder; forkyndt; udbeder; oplysning; jnddrivelse; inddrivelse; meddelt; paternitetssag; opholdsted; nuværende; fortiden; ønskes; omløben; herredsfogden; nuhavende; sag; kriminel; resterende; blive; dom; indfordring; bødes; forklaring"    
+```
+
+Nogle klynger synes at handle om bestemte typer mennesker, imens andre handler om måder at beskrive på.
+
+Vi kigger på deres udvikling over tid.
+
+```{r warning = FALSE}
+df4 <- df3 %>% 
+  filter(clusters != 0) %>% 
+  mutate(år = year(dato))
+
+ggplot(df4) +
+  geom_bar(aes(x = år, fill = as.factor(clusters)), position = "fill") +
+  geom_text(aes(x = år, fill = as.factor(clusters), label = clusters),
+            position = position_fill(vjust = 0.5),
+            stat = "count",
+            size = 2) +
+  theme(legend.position = "NULL") +
+  ylab("andel")
+```
+
+![](billedfiler/Skærmbillede%202025-11-05%20kl.%2014.29.11.png)
+
+Det er tydeligt, at mediet først finder en form efter et par år. Derefter er mønsteret ret stabilt, men domineres imod slutningen af en bredere vifte af små kategorier.
+
+## Superviseret læring via en eksisterende sprogmodel
+
+Udover dette usuperviserede workflow lavede vi også en superviseret kategorisering. Vi samplede 1500 tilfældige tekster og besluttede os for fem kategorier, vi ville tagge efter:
+
+1.  Omtaler efterlysningen en efterlyst kvinde? Såfremt annoncen omtaler efterlyste af begge køn tagges denne også her.
+2.  Omtaler efterlysningen en udlænding? Vi definerede i denne kontekst alle, der ikke havde nationalstaten Danmark som ophav. Sprogmarkører (f.eks. "taler tysk og gebrokkent dansk") blev også benyttet til denne tagging.
+3.  Indeholder efterlysningen et signalement? Her regnede vi alt, der kunne gøre det muligt at forestille sig personens udseende og fremtoning, inklusiv specifikke taleegenskaber, som signalement.
+4.  Udtrykker efterlysningen bekymring? Vi havde identificeret, hvordan nogle efterlysninger ikke italesatte en overtrædelse, men blot en forsvinden ofte fra hjemmet. I en del af disse efterlysninger spekuleres der desuden i, at der kan være sket personen en ulykke eller sågar at personen kan være til fare for sig selv.
+5.  Er efterlysningen en fremlysning? Dvs. en efterlysning, hvor personen faktisk er tilstede, men alligevel beskrives på tilsvarende måde, fordi der er brug for at indhente oplysninger om vedkommende. Vi valgte også at tagge annoncer om afdøde med dette tag.
+
+Vi trænede herefter setfit-modeller med disse data. Dette foregik i python med versioner af følger script:
+
+```{python}
+import pandas as pd
+import numpy as np
+from datasets import Dataset
+from setfit import SetFitModel, SetFitTrainer
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
+df = pd.read_csv("efterlysninger_1500.csv")
+
+df["Udlænding?"] = pd.to_numeric(df["Udlænding?"], errors="coerce").fillna(0).astype(int)
+df["label"] = df["Udlænding?"]
+df = df.dropna(subset=['Text'])
+df['text'] = df['Text'].astype(str).str.strip()
+df = df[df['text'] != ''].copy()
+
+dataset = Dataset.from_pandas(df[["text", "label"]])
+dataset = dataset.train_test_split(test_size=0.3, seed=49)
+
+train_dataset = dataset["train"]
+test_dataset = dataset["test"]
+
+model = SetFitModel.from_pretrained("JohanHeinsen/Old_News_Segmentation_SBERT_V0.1")
+
+def compute_metrics(preds, labels):
+    acc = accuracy_score(labels, preds)
+    f1 = f1_score(labels, preds, average='binary')
+    precision = precision_score(labels, preds, average='binary')
+    recall = recall_score(labels, preds, average='binary')
+    return {
+        "accuracy": acc, 
+        "f1": f1,
+        "precision": precision,
+        "recall": recall
+    }
+
+trainer = SetFitTrainer(
+    model=model,
+    train_dataset=train_dataset,
+    eval_dataset=test_dataset,
+    metric=compute_metrics,
+    batch_size=24,
+    num_iterations=10,
+    num_epochs=1,
+    learning_rate=2e-5
+)
+
+trainer.train()
+metrics = trainer.evaluate()
+print("Metrics:", metrics)
+```
+
+De præcise træningsparametre for de tre modeller kan ses på Huggingface. De tre modeller har følgende metrics:
+
+| Model                   | Nøjagtighed | Præcision | Genkaldelse | F1     |
+|-------------------------|-------------|-----------|-------------|--------|
+| PE_efterlyst_appearance | 0.9665      | 0.9702    | 0.9890      | 0.9795 |
+| PE_efterlyst_foreigner  | 0.9688      | 0.8545    | 0.8868      | 0.8704 |
+| PE_efterlyst_gender     | 0.98        | 0.9437    | 0.9306      | 0.9371 |
+
+Det lykkedes os ikke at træne tilfredsstillende modeller til at identificere henholdsvis bekymrede efterlysninger eller fremlysninger, givetvis fordi der var så få af dem.
+
+Modellerne blev uploadet til Huggingface og er derefter kørt en for en sådan her:
+
+```{python}
+import pandas as pd
+from setfit import SetFitModel
+
+model = SetFitModel.from_pretrained("JohanHeinsen/PE_efterlyst_gender")
+
+df = pd.read_excel('Efterlysninger_fra_PE.xlsx')
+
+texts = df['Text'].tolist()
+
+probs = model.predict_proba(texts)
+
+female_prop = probs[:, 1]
+
+df['female_prop'] = female_prop
+
+df.to_csv('Predictions_with_female.csv', index=False)
+```
+
+Vi loader resultaterne ind i R for at se på, hvordan mønstrene udvikler sig over tid.
+
+```{r}
+df_classes <- read.csv("Predictions_with_female_foreigner_appearance.csv") %>% 
+  filter(str_detect(seneste_overskrift, "lysning|eddelelse")) %>% 
+  filter(!str_detect(seneste_overskrift, "(A|a)flys"))
+
+df_classes_year <- df_classes %>% 
+  mutate(år = year(dato)) %>% 
+  group_by(år) %>% 
+  summarise(kvinde = mean(female_prop),
+            udlænding = mean(foreigner_prop),
+            signalement = mean(apperance_prop)) %>% 
+  pivot_longer(cols = c(kvinde, udlænding, signalement), values_to = "relativ_forekomst", names_to = "omtaler")
+
+ggplot(df_classes_year) +
+  geom_line(aes(x = år, y = relativ_forekomst, colour = omtaler))
+```
+
+![](billedfiler/Skærmbillede%202025-11-05%20kl.%2019.46.11.png)
+
+Det undrede os, at alle tre kategorier falder over perioden. Det relative fald er størst for de to små kategorier, men vi ser også, at andelen af efterlysninger med signalement falder. Det har vi brug for at undersøge nærmere. Og for at gøre det, har vi brug for at krydse kategorierne med andre datapunkter - f.eks. klyngerne fra vores umap.
+
+## Kategorisering med blandet workflow
+
+Vi skaber derfor kategorier på baggrund af output fra vores setfit modeller, regulære udtryk og de clusters vi fandt via hdbscan på vores umap af paragraph2vec. De regulære søgeudtryk er informeret om de slægtskaber vi kunne se igennem vores word2vec. F.eks. har vi tjekket denne efter ord associeret med "løsgænger" og fundet en række andre ord, der kunne være indikatorer på, at personen stod udenfor arbejdsmarkedet.
+
+De tags vi skaber i denne proces må forstås som informerede forslag. Målet er at få måder at opdele materialet for at se bredere mønstre. Vi accepterer med andre ord, at der kan være fejl.
+
+```{r}
+clusters_annoteret <- read_xlsx("clusters_annoteret_fix.xlsx") %>% select(-clusters)
+
+df_classes_2 <- df_classes %>% 
+  left_join(clusters_annoteret)
+
+df_classes_3 <- df_classes_2 %>% 
+  mutate(
+    papir = case_when(str_detect(str_to_lower(Text), "tvangspas|skudsmaal|vandreb|legitimation| pas |opholdsbog|papirer|re(i|j)sebog|døbeattest|re(i|j)sepas|søfartsbog") == TRUE ~ "omtale af dokumentationspapirer", .default = NA),
+    løsgænger = case_when(str_detect(str_to_lower(Text), "løsgænger|vagabond|driver|stre(i|j)fe|omflakke|tigge|betle|arbejdsløs|erhvervsløs") == TRUE ~ "arbejdsløshed", .default = NA),
+    død = case_when(tags == "afdøde" ~ "afdøde", .default = NA),
+    bøde = case_when((tags == "skyldnere" | tags == "bøder") & str_detect(str_to_lower(Text), "bøde|alimentation|alimentant|mulkt|underholdningsbidrag|forsørgelsessag|paternitet|nddrivelse|ndfordring|skilsmisse|gjæld") == TRUE ~ "skyldner", .default = NA),
+    fattig = case_when(tags == "sociale omstændigheder" & str_detect(str_to_lower(Text), "fattig|subsistens|arbe(i|j)jds(ans|hus)") == TRUE ~ "omtale af sociale omstændigheder", .default = NA),
+    sigtelse = case_when(str_detect(str_to_lower(Text), "sigte") == TRUE ~ "sigtelse for forbrydelse", .default = NA),
+    kvinde = case_when(female_prop > 0.5 ~ "omtale af kvinde", .default = NA),
+    udlænding = case_when(foreigner_prop > 0.5 ~ "omtale af udlænding", .default = NA),
+    signalement = case_when(apperance_prop > 0.5 ~ "signalement", .default = NA),
+    bekymring = case_when(tags == "bekymring for den efterlyste" ~ "bekymring for den efterlyste", .default = NA),
+    militær = case_when(tags == "militær" | tags == "værnepligt" ~ "militær tilknytning", .default = NA),
+    opfølgning = case_when(tags == "opfølgning" ~ "opfølgning", .default = NA))
+
+df_tag_frame <- df_classes_3 %>% 
+  select(papir, løsgænger, død, bøde, fattig, sigtelse, kvinde, udlænding, signalement, bekymring, militær, opfølgning)
+
+df_tag_frame$samlede_tags <- apply(df_tag_frame, 1, function(x) paste(na.omit(x), collapse = "; "))
+
+df_tag_frame_total <- df_tag_frame %>% select(samlede_tags)
+
+df_opdateret <- df %>% 
+  select(-text) %>% 
+  cbind(df_tag_frame_total)
+
+df_tag_frame_2 <- df_tag_frame %>% 
+  select(-samlede_tags) %>% 
+  mutate(across(everything(), ~ ifelse(!is.na(.) & . != "", 1, 0))) %>% as.matrix()
+
+korrelationer <- cor(df_tag_frame_2) %>% as.data.frame()
+```
+
+Tabellen over korrelationer ser sådan ud:
+
+![](images/Skærmbillede%202025-11-06%20kl.%2017.54.03.png)
+
+Det er tydeligt, at der er en negativ sammenhæng imellem signalement og bestemte kategorier, især militær og skyldnere. Vi ser også, at der er en svag positiv korrelation imellem omtale af dokumentation og både de arbejdsløse og udlændinge. Det kunne indikere at spørgsmålet om dokumentation især handler om bestemte grupper, der stadig er pålagt kravet om personlig dokumentation under bevægelse - et levn fra Enevælden.
+
+Lad os tjekke kvaliteten af vores klassifikation ved at kigge på en kategori.
+
+```{r}
+df_tjek <- df_opdateret %>% 
+  filter(str_detect(samlede_tags, "skyldner")) %>% 
+  slice_sample(n = 8)
+
+df_tjek$Text
+```
+
+```         
+[1] "4) Tjenestekarl Niels Johannessen, f. i Steenmagle, den 19. October 1834, bedes i Antræffelsestilfælde, affordret en Bøde af 20 Kr. til Merløse-TudseHerreders Politikasse og i Mangel af Betaling, hensat til Afsoning af samme til simp. Fængsel i 5 Dage efter Holbæk Amts Resolution af 4. f. M. Han forlod den 1. Novbr. f. A. Egholm i HornsHerred, uden at der senere er oplyst noget om hans Opholdsted. Underretning bedes meddelt Merløse-Tudse Herreders Kontor i Holbæk. Det er en simpel og brutal Person, der ligge fra Foraaret 1878, ved at flytte hemmeligt fra Sted til Sted, har søgt at unddrage sig Ansvar."
+[2] "2) J Anledning af Alimentationsbidrags Jnddrivelse beder Herredsfogden i Sunds-Gudme Herreder sig meddelt Oplysning om, hvor Tjenestekarl Jens Jørgensen for Tiden opholder Han tjente indtil 1. Maj paa Gammel Klingstrup i Skaarup Sogn."                                                                                                                                                                                                                                                                                                                                                                                      
+[3] "5) Da Tjenestekarl Jens Peter Ottesen af Gierninge ikke har betalt en den 1ste f. M. forfalden Mulkt til de Fattiges Kasse i Kornerup Sogn, stor 10 Rd., og hans Opholdsted ikke kjendes, bedes i Antræffelsestilfælde Mulk. ten i Henhold til Dekret fra Sjællands Stiftamt af 23de f. M. foranstaltet afsonet med simpelt Fængsel i 5 Dage og Underretning meddelt Herredsfogden i Lejre Hørred."                                                                                                                                                                                                                              
+[4] "2) J Anledning af Jndfordring af et Alimentationsbidrag beder By- og Herredsfogden Kjøge søgt Oplysning om Arbejdsmand Jens Jacobsens Opholdsted. Han har sidst havt Bopæl i Kjøbenhavn, Badeveien 13."                                                                                                                                                                                                                                                                                                                                                                                                                          
+[5] "4) Garversvend Maximilian Petersen skylder til Aalborg Kjøbstads Politikasse en Bøde af Kroner, hvilken han ifølge Aalborg Stiftamts Resolution af 25 April 1882 er tilpligtet at afsone med simpel Fængsel i 2 Dage. Han er den 14. Juni f. A. viseret fra Kjøge til Storehedinge, hvilken By han har forladt den paafølgende Dag, efterladende sin Vandrebog paa Byfogdekontoret. Oplysning om hans Opholdsted bedes meddelt Byfogden i Aalborg."                                                                                                                                                                              
+[6] "7) Oplysning om forhenv. Sporvognskusk ved Kbhvn.s Sporvejsselskab, senere Vognmandskusk, Jens Nielsens Opholdsted udbedes i Anledning. af en Skilsmissesag. Han har formentl. Tjeneste i Hirschholm el. Frederiksborg Birk. (H. St.)"                                                                                                                                                                                                                                                                                                                                                                                           
+[7] "3) Herredsfogden i Børglum Herred udbedes sig meddelt Oplysning om Møllersvend Anders Christian Svendsens Opholdsted for at et forfaldent Alimentationsbidrag kan blive inddrevet hos ham, Fra 1. April til Slutningen. af forrige Maaned eller til Begyndelsen af denne Maaned arbejdede han hos Møller Heyndorf i Terslev Sogn under Bregentved-Gisselfeld, Birkers Jurisdiktion, hvilket Opholdsted han imidlertid forlod, efter Udpantningsordrens Forkyndelse."                                                                                                                                                             
+[8] "1) En Person, der har kaldet sig Alfred Hjermind fra Odense, har den 19. Ds. hemmelig forladt Hotel du Nord i Hjørring, efterladende sien Gjæld paa 8 Kr. 5 Øre. Hans Signalement er opgivet saaledes: 36 a 38 Aar gl., middelhøj, tyndt lyst Haar, blondt Kindskjæg og velklædt, I Antræffelsestilfælde bedes han affordret det ovennævnte Beløb og i Mangel af Betaling anholdt samt Underretning meddelt Byfogden i Hjørring."  
+```
+
+Metoden vi har anlagt betyder, at vi må forvente, at kategorierne i alle tilfælde vil indeholde både falske positive (f.eks. fordi et indikativt ord bruges i en tekst, men ikke i den forstand, det tænkes her). Samtidig vil der også være falske negativer, f.eks. fordi vores clustering-proces (som indikeret af visualiseringerne) efterlader en del materiale uden tilhør til klynger eller fordi vores setfit-modeller ikke har kunnet fange outliers.
+
+Alligevel kan vi begynde at se mønstre. F.eks. i forhold til, hvilke folk, der faktisk ikke beskrives. De falder typisk i en af de tre kategorier: "skyldner", "militær" eller "opfølgning" - hvor sidstnævnte indeholder opfølgende oplysninger om personer, der tidligere er efterlyst, men hvor der trykkes en ny tekst, der bidrager med senere indkomne oplysninger. Det ser ud til, at det er disse tre - signalementsløse - kategorier, der skaber det mønster, vi tidligere identificerede i forhold til den dalende andel af efterlysninger med signalementer.
+
+```{r}
+df_opdateret %>% 
+  mutate(hit1 = as.numeric(str_detect(samlede_tags, 
+                                     "signalement")),
+         hit2 = as.numeric(str_detect(samlede_tags, 
+                                     "skyldner|militær|opfølgning")),
+         år = year(dato)) %>% 
+  group_by(år) %>% 
+  summarise(hit1_average = mean(hit1),
+            hit2_average = mean(hit2)) %>% 
+  ggplot() +
+  geom_line(aes(x = år, y = hit1_average), colour = "forestgreen") +
+  geom_line(aes(x = år, y = hit2_average), colour = "red") +
+  geom_text(y = 0.75, x = 1880, label = "Signalement", colour = "forestgreen") +
+  geom_text(y = 0.27, x = 1881, label = "militære, skyldnere og opfølgninger", colour = "red") +
+  ylab("andel af efterlysninger")
+```
+
+![](images/Skærmbillede%202025-11-06%20kl.%2017.43.46.png)
+
+Dermed har vi fået indsnævret, hvad der op og ned i dette mønster. Der handler primært om nogle bestemte grupper, typisk mænd, der har en systematisk tilstedeværelse i materialet, men beskrives uden at beskrive deres kroppe og fremtoning.
+
+På en måde overrasker det. Litteraturen fortæller os, at politiets greb om befolkningen handler om deres kroppe. Dette er perioden for det "biometriske" politi og det "standardiserede blik". Disse efterlysninger er hverken rettet imod kroppen eller specielt standardiserede. Men politiet har tilsyneladende ikke brug for kropsbeskrivelsen for at identificere disse mennesker - måske fordi de formodes ikke at bevæge sig under falske navne? Eller fordi man forestiller sig, at de før eller siden dukker op igen på steder, hvor det lokale politi allerede kender dem?
+
+Hvordan ser det ud med udviklingen i statens pasdokumentation?
+
+```{r}
+df_opdateret %>% 
+  mutate(hit1 = as.numeric(str_detect(samlede_tags, 
+                                     "dokumentation")),
+         år = year(dato)) %>% 
+  group_by(år) %>% 
+  summarise(hit1_average = mean(hit1)) %>% 
+  ggplot() +
+  geom_line(aes(x = år, y = hit1_average), colour = "forestgreen") +
+  ylab("andel af efterlysninger") +
+  ggtitle("Annoncer med omtale af legitimationspapirer")
+```
+
+![](images/Skærmbillede%202025-11-06%20kl.%2009.57.49.png)
+
+Bemærk, at det er relativt få annoncer, der omtaler legitimationspapirer, men mønsteret er relativt stabilt henover perioden, med en svagt nedadgående tendens imod slutning. Sidstnævnte kunne hænge sammen med den overordet set mindre andel af efterlysninger, der handler om udlændinge fra sidste del af perioden.
+
+Dette overrasker måske også. Dette er perioden, hvor mobiliteten kanonisk er givet fri - og før det internationale passystem dukker op i starten af det 20. århundrede, der fikserer mobiliteten om de eksterne grænser. Alligevel optræder forskellige dokumentationsformer i materialet - som elementer der kan guide identifikation.
+
+## Hvad kendetegner efterlysninger med omtale af dokumentation?
+
+```{r}
+df_dokumentation <- df_opdateret %>% 
+  filter(str_detect(samlede_tags, "dokumentation"))
+
+dokumentations_embeddings <- samlet_emb_docs %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "tekst_id") %>% 
+  semi_join(df_dokumentation) %>% 
+  column_to_rownames(var = "tekst_id") %>% as.matrix()
+
+dokumentations_umap <- umap(dokumentations_embeddings,
+                            verbose = TRUE,
+                            metric = "cosine",
+                            n_neighbors = 15,
+                            min_dist = 0.001)
+
+dokumentations_koordinater <- dokumentations_umap$layout %>% as.data.frame()
+
+ggplot(dokumentations_koordinater) +
+  geom_point(aes(x = V1, y = V2), size = 0.5)
+```
+
+![](images/Skærmbillede 2025-11-12 kl. 10.25.34.png)
+
+Jeg ved ikke lige hvilken retning, det sidste her kan tage...
+
+## Eksport
+
+Vi gemmer til sidst vores taggede datasæt.
+
+```{r}
+df_opdateret %>% write.csv("Efterlysninger_med_tags.csv", row.names = FALSE)
+
+df_opdateret_tjek <- read.csv("Efterlysninger_med_tags.csv")
+```
