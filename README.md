@@ -4,11 +4,20 @@
 <br/>
 
 # SPOR
+
+##Baggrund
 <br/>
 Mellem 1867 og 1920 udgav det danske politi et blad kaldet "Politiets Efterretninger", som, bredt forstået, indeholdt relevant information om kriminel aktivitet, der blev cirkuleret rundt politiafdelinger henover Danmarks areal. På sin vis er der tale om datidens døgnrapporter. I forbindelse med et kursus på kandidatuddannelsen i historie på Aalborg Universitet og i samarbejde med Københavns Stadsarkiv, er materialet fra 1867-1890 blevet digitaliseret og tilgængeliggjort. Denne side dokumenterer processens forskellige trin og deres bagvedliggende rationaler.
+
+##Usage
+
+```
+library(readxl)
+df <- readxl(insertnameofexceldocumenthere.xlsx)
+```
+
 
 [!IMPORTANT]
 >Det følgende datasæt inkludere potentielt stødende materiale.
 
-## Requirements
-* R Studio
+
