@@ -23,7 +23,7 @@ df <- readxl(insertnameofexceldocumenthere.xlsx)
 
 ## Documentation
 Følgende datasæt er baseret på overleveret indskanninger fra Københavns stadsarkiv. I alt sidder datasættet på cirka 16000 sider værd af information fra Politiets efterrettninger i perioden 1867-1890. <br/>
-Primær informationsprocessering er fortaget igennem Transkribus. Dataen blev derefter valideret og checket af en gruppe af studerne hvorefter at datasættet er blevet linket til at starte med en ```Word2Vec``` <br/> model med følgende parameter
+Primær informationsprocessering er fortaget igennem Transkribus. Dataen blev derefter valideret og checket af en gruppe af studerne hvorefter at datasættet er blevet linket til at starte med en ```Word2Vec``` model med følgende parameter
 
 ```
 set.seed(1234)
