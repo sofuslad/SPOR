@@ -11,12 +11,12 @@ Mellem 1867 og 1920 udgav det danske politi et blad kaldet "Politiets Efterretni
 <br/>
 
 ## Usage
-<br/>
+
 ```
 library(readxl)
 df <- readxl(insertnameofexceldocumenthere.xlsx)
 ```
-<br/>
+
 
 [!IMPORTANT]
 >Det følgende datasæt inkludere potentielt stødende materiale.
