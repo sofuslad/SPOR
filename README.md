@@ -29,6 +29,7 @@ Primær informationsprocessering er fortaget igennem Transkribus.
 
 ### *Data Sample*
 <ins> I nedstående Data-sample er tekst region og linje region fremhævet</ins>
+<br>
 <img width="458" height="417" alt="Data_sample" src="https://github.com/user-attachments/assets/72f2f197-3f8a-4df8-bc0f-348149e7e48a" />
 <br/>
 Tekst regioner og linjer er rettet igennem af en gruppe studerende der arbejdede på dette projekt.
